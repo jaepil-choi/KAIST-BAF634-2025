@@ -11,14 +11,13 @@
 from qdl.facade import QDL
 
 q = QDL()
-# 예시: 미국(usa) / 시장(mkt) / 월별(monthly, 고정) / 시가총액가중(vw)
-df = q.load(
-    "factors",
-    country="usa",
-    dataset="mkt",
-    weighting="vw",
-)
-print(df.head())
+# 요인 데이터 로드(미국/시장/월별/시가총액가중)
+factors = q.load_factors(country="usa", dataset="mkt", weighting="vw")
+print(factors.head())
+
+# 특성 데이터 로드(JKP 빈티지 2020-, 미국)
+chars = q.load_chars(country="usa", vintage="2020-")
+print(chars.head())
 ```
 
 > 주의: 이 공개 API는 컬럼명/스키마를 임의로 추측하지 않습니다. 검증(`validate_factor`)은 스키마 키/명시적 컬럼 지정과 함께 제공될 예정입니다.
@@ -27,7 +26,6 @@ print(df.head())
 
 | 파라미터 | 허용 값 | 기본값 | 설명 |
 |---|---|---|---|
-| domain | `"factors"` | `"factors"` | 현재 지원 도메인은 요인 데이터만 해당 |
 | country | `"usa"`, `"kor"` | (필수) | 국가/지역 선택 |
 | dataset | `"factor"`, `"theme"`, `"mkt"` | (필수) | 요인 집합, 테마 집합, 시장(시장포트폴리오) |
 | weighting | `"ew"`, `"vw"`, `"vw_cap"` | (필수) | 동일가중, 시가총액가중, 시가총액기준 가중 |
@@ -37,18 +35,16 @@ print(df.head())
 예시 호출:
 
 ```python
-q.load("factors", country="kor", dataset="factor", weighting="ew")
-q.load("factors", country="usa", dataset="theme", weighting="vw_cap")
-q.load("factors", country="usa", dataset="mkt", weighting="vw")
+q.load_factors(country="kor", dataset="factor", weighting="ew")
+q.load_factors(country="usa", dataset="theme", weighting="vw_cap")
+q.load_factors(country="usa", dataset="mkt", weighting="vw")
 ```
 
 ## 공개 API
 
-- `QDL.load(domain, *, country, dataset, weighting, frequency="monthly", encoding="utf-8") -> pd.DataFrame`
-  - 지원 도메인: `"factors"` (현재)
-  - 파일명 규칙에 따라 데이터를 로드합니다. 스키마는 강제하지 않습니다.
+- `QDL.load_factors(*, country, dataset, weighting, frequency="monthly", encoding="utf-8") -> pd.DataFrame`
+- `QDL.load_chars(*, country, vintage, columns=None, engine="pyarrow") -> pd.DataFrame`
 - `QDL.validate_factor(user_df, reference_df=None, *, on, value_col, reference_load_params=None, **kwargs) -> ValidationReport`
-  - 추후 제공(스키마 명시 또는 설정 기반 해석과 함께). 현재 인터페이스만 고정되어 있습니다.
 
 ## 원칙
 

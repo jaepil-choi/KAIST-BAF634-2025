@@ -21,19 +21,53 @@ Design policies (from PRD v0.2):
 - Do not invent schemas or column names.
 - Use absolute imports and centralized path config from `qdl.config`.
 - Raise explicit errors; do not synthesize data on failure.
+
+Factor reader spec (factors CSV)
+--------------------------------
+Inputs (required unless noted):
+- country: {"usa", "kor"}
+- dataset: {"factor", "theme", "mkt"} → mapped internally to {"all_factors", "all_themes", "mkt"}
+- frequency: {"monthly"} (only) — default "monthly"
+- weighting: {"ew", "vw", "vw_cap"}  ← includes "vw" option
+- encoding: str (default "utf-8")
+
+File naming pattern (literal brackets/underscores):
+    "[<country>]_[<dataset_token>]_[monthly]_[<weighting>].csv"
+Examples:
+    [usa]_[all_factors]_[monthly]_[ew].csv
+    [usa]_[mkt]_[monthly]_[vw].csv
+    [kor]_[all_themes]_[monthly]_[vw_cap].csv
+
+Location:
+- Files are read from qdl.config.FACTORS_PATH (i.e., <repo>/data/factors)
+
+Behavior:
+- Validate inputs; build the exact filename; assemble full path under FACTORS_PATH
+- If file exists: load with pandas.read_csv(encoding=encoding) and return DataFrame (no schema enforcement)
+- If file missing: raise FileNotFoundError and list available .csv files in the directory
+- If inputs invalid: raise ValueError with clear message
+
+Notes:
+- Any column parsing/renaming/typing happens in `qdl.transformer` later
+- Future: expose optional usecols/dtype hints if needed for performance
+
+Usage examples:
+- load_factors(country="usa", dataset="mkt", weighting="vw")
+- load_factors(country="kor", dataset="factor", weighting="ew")
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, List, Set
 
 import pandas as pd
 
-from qdl.config import FACTORS_PATH
+from qdl.config import FACTORS_PATH, CHARS_PATH
 
 Country = Literal["usa", "kor"]
 DatasetKind = Literal["factor", "theme", "mkt"]
 Weighting = Literal["ew", "vw", "vw_cap"]
 Frequency = Literal["monthly"]
+Vintage = Literal["1972-", "2000-", "2020-"]
 
 
 _DATASET_TOKEN_BY_KIND = {
@@ -114,3 +148,126 @@ def load_factors(
     # Schema-agnostic load. Any parsing/normalization belongs in transformer.
     df = pd.read_csv(file_path, encoding=encoding)
     return df
+
+
+# --------------- Characteristics (Parquet) loader -----------------
+
+def _build_jkp_chars_filename(*, country: Country, vintage: Vintage) -> str:
+    """
+    Build the JKP characteristics parquet filename.
+
+    Example outputs:
+    - jkp_1972-_usa.parquet
+    - jkp_2020-_kor.parquet
+    """
+    return f"jkp_{vintage}_{country}.parquet"
+
+def _resolve_single_parquet(
+    base_dir: Path,
+    *,
+    file_name: Optional[str] = None,
+    patterns: Optional[List[str]] = None,
+) -> Path:
+    """
+    Resolve exactly one parquet file under `base_dir` using either an exact
+    `file_name` or a set of glob `patterns`. Raises when zero or multiple match.
+    """
+    if file_name:
+        candidate = base_dir / file_name
+        if not candidate.exists():
+            available = sorted(p.name for p in base_dir.glob("*.parquet"))
+            raise FileNotFoundError(
+                f"Parquet file not found: {candidate} (available: {', '.join(available) if available else 'none'})"
+            )
+        if candidate.suffix.lower() != ".parquet":
+            raise ValueError("file_name must point to a .parquet file")
+        return candidate
+
+    if not patterns:
+        raise ValueError("Provide either 'file_name' or one or more 'patterns' to locate a parquet file")
+
+    matched: Set[Path] = set()
+    for pat in patterns:
+        for p in base_dir.glob(pat):
+            if p.suffix.lower() == ".parquet":
+                matched.add(p)
+    if not matched:
+        available = sorted(p.name for p in base_dir.glob("*.parquet"))
+        raise FileNotFoundError(
+            f"No parquet files matched patterns {patterns} under {base_dir} (available: {', '.join(available) if available else 'none'})"
+        )
+    if len(matched) > 1:
+        names = ", ".join(sorted(m.name for m in matched))
+        raise ValueError(f"Ambiguous patterns; matched multiple files: {names}")
+
+    return next(iter(matched))
+
+
+def load_chars(
+    *,
+    file_name: Optional[str] = None,
+    patterns: Optional[List[str]] = None,
+    columns: Optional[List[str]] = None,
+    engine: str = "pyarrow",
+) -> pd.DataFrame:
+    """
+    Load a characteristics parquet file from `data/chars/`.
+
+    Exactly one of `file_name` or `patterns` must identify a single `.parquet` file
+    under `qdl.config.CHARS_PATH`. No schema is assumed.
+
+    Parameters
+    ----------
+    file_name : str, optional
+        Exact parquet file name inside `data/chars/`.
+    patterns : list[str], optional
+        One or more glob patterns (relative to `data/chars/`) that must match
+        exactly one parquet file (e.g., ["jkp_2020-*_kor.parquet"]).
+    columns : list[str], optional
+        Column projection to speed up reads.
+    engine : str, default "pyarrow"
+        Parquet engine to use.
+
+    Returns
+    -------
+    pd.DataFrame
+        Raw DataFrame loaded via pandas.read_parquet.
+    """
+    file_path = _resolve_single_parquet(CHARS_PATH, file_name=file_name, patterns=patterns)
+    df = pd.read_parquet(file_path, columns=columns, engine=engine)
+    return df
+
+
+def load_chars_jkp(
+    *,
+    vintage: Vintage,
+    country: Country,
+    columns: Optional[List[str]] = None,
+    engine: str = "pyarrow",
+) -> pd.DataFrame:
+    """
+    Convenience loader for JKP characteristics parquet files under `data/chars/`.
+
+    Parameters
+    ----------
+    vintage : {"1972-", "2000-", "2020-"}
+        Starting vintage of the JKP sample window.
+    country : {"usa", "kor"}
+        Country code used in the file name.
+    columns : list[str], optional
+        Optional column projection for performance.
+    engine : str, default "pyarrow"
+        Parquet engine to use.
+
+    Returns
+    -------
+    pd.DataFrame
+        Raw DataFrame loaded via pandas.read_parquet.
+    """
+    if vintage not in ("1972-", "2000-", "2020-"):
+        raise ValueError("vintage must be one of {'1972-','2000-','2020-'}")
+    if country not in ("usa", "kor"):
+        raise ValueError("country must be one of {'usa','kor'}")
+
+    file_name = _build_jkp_chars_filename(country=country, vintage=vintage)
+    return load_chars(file_name=file_name, columns=columns, engine=engine)

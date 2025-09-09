@@ -33,31 +33,77 @@ class QDL:
         self._loader = loader or _dataloader
         self._validator = validator or _validator
 
-    def load(
+    def load_factors(
         self,
-        domain: Literal["factors"],
-        /,
         *,
         country: Literal["usa", "kor"],
         dataset: Literal["factor", "theme", "mkt"],
         weighting: Literal["ew", "vw", "vw_cap"],
         frequency: Literal["monthly"] = "monthly",
         encoding: str = "utf-8",
+        columns: Optional[List[str]] = None,
+        strict: bool = True,
     ) -> pd.DataFrame:
         """
-        Load datasets by domain.
+        Load factor datasets (CSV) via the public API.
 
-        Currently supports only domain="factors" and delegates to dataloader.load_factors.
+        Delegates to dataloader.load_factors.
         """
-        if domain != "factors":
-            raise NotImplementedError("Only domain='factors' is supported by the facade at this stage")
-        return self._loader.load_factors(
+        df = self._loader.load_factors(
             country=country,
             dataset=dataset,
             weighting=weighting,
             frequency=frequency,
             encoding=encoding,
         )
+        if columns is None:
+            return df
+
+        missing = [c for c in columns if c not in df.columns]
+        if missing and strict:
+            raise KeyError(f"Requested columns not found: {missing}")
+
+        present_in_order = [c for c in columns if c in df.columns]
+        return df[present_in_order]
+
+    def load_chars(
+        self,
+        *,
+        country: Literal["usa", "kor"],
+        vintage: Literal["1972-", "2000-", "2020-"],
+        columns: Optional[List[str]] = None,
+        engine: str = "pyarrow",
+        strict: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Load JKP characteristics datasets (Parquet) via the public API.
+
+        Constructs the filename from (vintage, country) and delegates to dataloader.load_chars.
+        """
+        file_name = f"jkp_{vintage}_{country}.parquet"
+        if columns is None or strict:
+            # Strict mode (or no projection): delegate directly; underlying reader will raise on missing columns
+            return self._loader.load_chars(
+                file_name=file_name,
+                columns=columns,
+                engine=engine,
+            )
+
+        # Non-strict with projection: try pushdown first; if it fails, load all and filter intersection
+        try:
+            return self._loader.load_chars(
+                file_name=file_name,
+                columns=columns,
+                engine=engine,
+            )
+        except (KeyError, ValueError):
+            df_all = self._loader.load_chars(
+                file_name=file_name,
+                columns=None,
+                engine=engine,
+            )
+            present_in_order = [c for c in columns if c in df_all.columns]
+            return df_all[present_in_order]
 
     def validate_factor(
         self,
@@ -83,7 +129,7 @@ class QDL:
         value_col : str
             Name of the numeric value column to compare. Required (no PRD default).
         reference_load_params : dict, optional
-            Parameters forwarded to self.load(domain='factors', **params) when reference_df is not provided.
+            Parameters forwarded to self.load_factors(**params) when reference_df is not provided.
         kwargs : Any
             Forwarded to the underlying validator implementation (e.g., thresholds).
         """
@@ -95,7 +141,7 @@ class QDL:
                 raise ValueError(
                     "reference_df is None and reference_load_params not provided; cannot load reference"
                 )
-            ref = self.load("factors", **reference_load_params)
+            ref = self.load_factors(**reference_load_params)
         else:
             ref = reference_df
 
