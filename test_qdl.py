@@ -16,7 +16,7 @@ def main() -> None:
     q = QDL()
     df2 = q.load_factors(
         country="usa",
-        dataset="mkt",
+        dataset="factor",
         weighting="vw",
         columns=["date", "name", "ret"],
     )
@@ -29,12 +29,12 @@ def main() -> None:
     ref_wide = wide2.iloc[:-6].copy()    # drop last ~6 rows from reference
 
     common_idx = user_wide.index.intersection(ref_wide.index)
-    user_aligned = user_wide.loc[common_idx, "mkt"]
-    ref_aligned = ref_wide.loc[common_idx, "mkt"]
+    user_aligned = user_wide.loc[common_idx, :]
+    ref_aligned = ref_wide.loc[common_idx, :]
 
-    mse = ((user_aligned - ref_aligned) ** 2).mean()
     print("\nValidation (index inner-join) period:", common_idx.min(), "to", common_idx.max())
-    print("Aligned length:", len(common_idx), "MSE:", float(mse))
+    print("Aligned length:", len(common_idx))
+    print("Columns equal (set):", set(user_aligned.columns) == set(ref_aligned.columns))
 
     # Validation using validator.ValidationReport over explicit join keys (column-based inner join)
     # Build long-form user/reference with differing periods using df2 (date,name,ret)

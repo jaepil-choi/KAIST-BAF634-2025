@@ -1,10 +1,10 @@
 """
 qdl.dataloader
 
-PRD v0.2-aligned, schema-agnostic DataLoader core for factors (minimal implementation).
+PRD v0.2-aligned, schema-agnostic DataLoader core for factors and characteristics.
 
-This module currently implements `load_factors` only, following the naming
-convention found under `data/factors/`:
+This module implements `load_factors` (CSV) and a generic `load_chars` (Parquet).
+`load_factors` follows the naming convention found under `data/factors/`:
 
     [<country>]_[<dataset>]_[monthly]_[<weighting>].csv
 
@@ -156,16 +156,6 @@ def load_factors(
 
 # --------------- Characteristics (Parquet) loader -----------------
 
-def _build_jkp_chars_filename(*, country: Country, vintage: Vintage) -> str:
-    """
-    Build the JKP characteristics parquet filename.
-
-    Example outputs:
-    - jkp_1972-_usa.parquet
-    - jkp_2020-_kor.parquet
-    """
-    return f"jkp_{vintage}_{country}.parquet"
-
 def _resolve_single_parquet(
     base_dir: Path,
     *,
@@ -244,38 +234,3 @@ def load_chars(
         df = df.copy()
         df["date"] = pd.to_datetime(df["date"], errors="raise")
     return df
-
-
-def load_chars_jkp(
-    *,
-    vintage: Vintage,
-    country: Country,
-    columns: Optional[List[str]] = None,
-    engine: str = "pyarrow",
-) -> pd.DataFrame:
-    """
-    Convenience loader for JKP characteristics parquet files under `data/chars/`.
-
-    Parameters
-    ----------
-    vintage : {"1972-", "2000-", "2020-"}
-        Starting vintage of the JKP sample window.
-    country : {"usa", "kor"}
-        Country code used in the file name.
-    columns : list[str], optional
-        Optional column projection for performance.
-    engine : str, default "pyarrow"
-        Parquet engine to use.
-
-    Returns
-    -------
-    pd.DataFrame
-        Raw DataFrame loaded via pandas.read_parquet.
-    """
-    if vintage not in ("1972-", "2000-", "2020-"):
-        raise ValueError("vintage must be one of {'1972-','2000-','2020-'}")
-    if country not in ("usa", "kor"):
-        raise ValueError("country must be one of {'usa','kor'}")
-
-    file_name = _build_jkp_chars_filename(country=country, vintage=vintage)
-    return load_chars(file_name=file_name, columns=columns, engine=engine)
