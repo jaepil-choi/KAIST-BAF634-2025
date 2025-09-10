@@ -118,7 +118,7 @@ class QDL:
         present_in_order = [f for f in factors if f in wide.columns]
         return wide[present_in_order]
 
-    def load_chars(
+    def load_char_dataset(
         self,
         *,
         country: Literal["usa", "kor"],
@@ -171,6 +171,57 @@ class QDL:
             keys_first = [c for c in required_keys if c in df_all.columns]
             rest = [c for c in target_cols if c in df_all.columns and c not in required_keys]
             return df_all[keys_first + rest]
+
+    # Backward-compatible alias to previous API name
+    def load_chars(
+        self,
+        *,
+        country: Literal["usa", "kor"],
+        vintage: Literal["1972-", "2000-", "2020-"],
+        columns: Optional[List[str]] = None,
+        engine: str = "pyarrow",
+        strict: bool = True,
+    ) -> pd.DataFrame:
+        return self.load_char_dataset(
+            country=country,
+            vintage=vintage,
+            columns=columns,
+            engine=engine,
+            strict=strict,
+        )
+
+    def load_char(
+        self,
+        *,
+        country: Literal["usa", "kor"],
+        vintage: Literal["1972-", "2000-", "2020-"],
+        char: str,
+        engine: str = "pyarrow",
+        strict: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Load a single characteristic and return a 2D wide DataFrame with `date` as index
+        and `id` as columns, values from the specified `char` column.
+        """
+        # Ensure required columns are present (strict load to surface errors early)
+        df = self.load_char_dataset(
+            country=country,
+            vintage=vintage,
+            columns=["date", "id", char],
+            engine=engine,
+            strict=True if strict else False,
+        )
+        # Pivot to wide
+        wide = _transformer.to_wide(
+            df,
+            index_cols=["date"],
+            column_col="id",
+            value_col=char,
+            agg="first",
+            sort_index=True,
+            sort_columns=True,
+        )
+        return wide
 
     def validate_factor(
         self,
