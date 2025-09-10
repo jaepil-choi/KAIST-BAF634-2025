@@ -48,6 +48,12 @@ class QDL:
         Load factor datasets (CSV) via the public API.
 
         Delegates to dataloader.load_factors.
+
+        Notes
+        -----
+        - Regardless of the requested `columns`, the composite identifier
+          ["date", "name"] is always included in the returned frame to
+          support downstream operations (e.g., pivoting or validation).
         """
         df = self._loader.load_factors(
             country=country,
@@ -59,12 +65,18 @@ class QDL:
         if columns is None:
             return df
 
-        missing = [c for c in columns if c not in df.columns]
+        # Always include composite identifier keys for factors
+        required_keys = ["date", "name"]
+        requested_with_required = list(dict.fromkeys([*columns, *required_keys]))
+
+        missing = [c for c in requested_with_required if c not in df.columns]
         if missing and strict:
             raise KeyError(f"Requested columns not found: {missing}")
 
-        present_in_order = [c for c in columns if c in df.columns]
-        return df[present_in_order]
+        # Order keys first, then the remaining requested columns preserving order
+        keys_first = [c for c in required_keys if c in df.columns]
+        rest = [c for c in requested_with_required if c in df.columns and c not in required_keys]
+        return df[keys_first + rest]
 
     def load_chars(
         self,
@@ -79,13 +91,26 @@ class QDL:
         Load JKP characteristics datasets (Parquet) via the public API.
 
         Constructs the filename from (vintage, country) and delegates to dataloader.load_chars.
+
+        Notes
+        -----
+        - Regardless of the requested `columns`, the composite identifier
+          ["date", "id"] is always included in the returned frame to support
+          downstream operations (e.g., pivoting).
         """
         file_name = f"jkp_{vintage}_{country}.parquet"
-        if columns is None or strict:
+        # Always include composite identifier keys for chars
+        required_keys = ["date", "id"]
+        if columns is None:
+            requested_with_required = None
+        else:
+            requested_with_required = list(dict.fromkeys([*columns, *required_keys]))
+
+        if requested_with_required is None or strict:
             # Strict mode (or no projection): delegate directly; underlying reader will raise on missing columns
             return self._loader.load_chars(
                 file_name=file_name,
-                columns=columns,
+                columns=requested_with_required,
                 engine=engine,
             )
 
@@ -93,7 +118,7 @@ class QDL:
         try:
             return self._loader.load_chars(
                 file_name=file_name,
-                columns=columns,
+                columns=requested_with_required,
                 engine=engine,
             )
         except (KeyError, ValueError):
@@ -102,8 +127,10 @@ class QDL:
                 columns=None,
                 engine=engine,
             )
-            present_in_order = [c for c in columns if c in df_all.columns]
-            return df_all[present_in_order]
+            target_cols = requested_with_required or []
+            keys_first = [c for c in required_keys if c in df_all.columns]
+            rest = [c for c in target_cols if c in df_all.columns and c not in required_keys]
+            return df_all[keys_first + rest]
 
     def validate_factor(
         self,
@@ -113,6 +140,7 @@ class QDL:
         on: Optional[List[str]] = None,
         value_col: Optional[str] = None,
         reference_load_params: Optional[Dict[str, Any]] = None,
+        names: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -130,6 +158,11 @@ class QDL:
             Name of the numeric value column to compare. Required (no PRD default).
         reference_load_params : dict, optional
             Parameters forwarded to self.load_factors(**params) when reference_df is not provided.
+        names : list[str], optional
+            Optional list of factor names to include in the validation when
+            working with long-form factors (column "name"). Both user and
+            reference datasets will be filtered to these names when the column
+            exists.
         kwargs : Any
             Forwarded to the underlying validator implementation (e.g., thresholds).
         """
@@ -144,6 +177,13 @@ class QDL:
             ref = self.load_factors(**reference_load_params)
         else:
             ref = reference_df
+
+        # Optional name-level filtering (long format factors)
+        if names:
+            if "name" in user_df.columns:
+                user_df = user_df[user_df["name"].isin(names)]
+            if "name" in ref.columns:
+                ref = ref[ref["name"].isin(names)]
 
         # Delegate to validator; assumes a compatible API exists.
         return self._validator.validate_factor(

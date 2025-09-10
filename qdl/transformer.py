@@ -98,3 +98,37 @@ def to_wide_factors(
         sort_columns=True,
     )
     return wide
+
+
+def to_wide_chars(
+    df: pd.DataFrame,
+    *,
+    date_col: str = "date",
+    id_col: str = "id",
+    value_col: str,
+    agg: AggKind = "first",
+) -> pd.DataFrame:
+    """
+    Pivot characteristics data to wide format.
+
+    - Rows indexed by `date_col`
+    - Columns from unique values of `id_col`
+    - Values from `value_col` (must be specified by caller)
+    """
+    _ensure_columns_exist(df, [date_col, id_col, value_col])
+
+    # Parse date column to datetime for stable indexing (no timezone assumption here).
+    if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        df = df.copy()
+        df[date_col] = pd.to_datetime(df[date_col], errors="raise")
+
+    wide = to_wide(
+        df,
+        index_cols=[date_col],
+        column_col=id_col,
+        value_col=value_col,
+        agg=agg,
+        sort_index=True,
+        sort_columns=True,
+    )
+    return wide

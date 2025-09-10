@@ -31,6 +31,10 @@ def main() -> None:
     )
     print(chars.head(5))
 
+    # Pivot characteristics to wide (date index, ids as columns) using value column 'me'
+    wide_chars = transformer.to_wide_chars(chars, value_col="me")
+    print(wide_chars.head(5))
+
 
 if __name__ == "__main__":
     main()
