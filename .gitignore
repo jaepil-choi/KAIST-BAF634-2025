@@ -244,3 +244,5 @@ pip-selfcheck.json
 
 .specstory/
 .what-is-this.md
+
+data/
