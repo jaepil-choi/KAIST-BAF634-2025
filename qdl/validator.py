@@ -49,6 +49,9 @@ class ValidationReport:
     thresholds: Optional[Dict[str, float]]
     diagnostics: Dict[str, Any]
     figure: Optional[Figure] = None
+    # Per-factor breakdown (keyed by factor identifier, typically 'name')
+    per_factor_metrics: Dict[str, Dict[str, Optional[float]]] | None = None
+    per_factor_n_obs: Dict[str, int] | None = None
 
 
 def _ensure_required_columns(df: pd.DataFrame, required: List[str], *, frame_name: str) -> None:
@@ -137,38 +140,83 @@ def _evaluate_thresholds(
     return all(ok for _, ok in rules)
 
 
-def _maybe_plot(
+def _maybe_plot_cumsum(
     aligned: pd.DataFrame,
     *,
     time_key: Optional[str],
+    on: List[str],
     title: str,
+    max_plot_factors: int,
 ) -> Optional[Figure]:
+    """Plot cumulative sum returns.
+
+    - If a factor key ("name") is in `on`, plot per-factor subplots (up to `max_plot_factors`).
+    - Otherwise, plot a single overlay of cumsum(user) vs cumsum(reference).
+    """
     if plt is None:
         return None
 
-    plot_df = aligned.copy()
-    x = plot_df[time_key] if (time_key is not None and time_key in plot_df.columns) else plot_df.index
+    has_factor_dim = "name" in on and "name" in aligned.columns
+    x_series = (
+        aligned[time_key]
+        if (time_key is not None and time_key in aligned.columns)
+        else aligned.index
+    )
 
-    fig, (ax_top, ax_bottom) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, gridspec_kw={"height_ratios": [2.0, 1.0]})
-    ax_top.plot(x, plot_df["ref_value"], label="reference", color="#1f77b4")
-    ax_top.plot(x, plot_df["user_value"], label="user", color="#ff7f0e", alpha=0.85)
-    ax_top.set_ylabel("value")
-    ax_top.legend(loc="best")
-    ax_top.grid(True, alpha=0.3)
-    ax_top.set_title(title)
+    if not has_factor_dim:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+        ax.plot(x_series, aligned["ref_value"].cumsum(), label="reference (cumsum)", color="#1f77b4")
+        ax.plot(x_series, aligned["user_value"].cumsum(), label="user (cumsum)", color="#ff7f0e", alpha=0.85)
+        ax.set_title(title)
+        ax.set_ylabel("cumsum return")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+        if time_key is not None:
+            ax.set_xlabel(time_key)
+        else:
+            ax.set_xlabel("index")
+        fig.tight_layout()
+        return fig
 
-    err = plot_df["user_value"] - plot_df["ref_value"]
-    ax_bottom.plot(x, err, label="error (user - ref)", color="#d62728")
-    ax_bottom.axhline(0.0, color="black", linewidth=0.8, alpha=0.6)
-    ax_bottom.set_ylabel("error")
-    ax_bottom.grid(True, alpha=0.3)
+    # Per-factor: build subplots
+    factors = list(dict.fromkeys(aligned["name"].dropna().astype(str)))
+    if not factors:
+        return None
+    factors = factors[: max(1, max_plot_factors)]
 
-    if time_key is not None:
-        ax_bottom.set_xlabel(time_key)
-    else:
-        ax_bottom.set_xlabel("index")
+    n = len(factors)
+    ncols = min(3, n)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.2 * nrows), sharex=True)
+    axes = axes if isinstance(axes, np.ndarray) else np.array([axes])
+    axes = axes.reshape(nrows, ncols)
 
-    fig.tight_layout()
+    for idx, factor in enumerate(factors):
+        r = idx // ncols
+        c = idx % ncols
+        ax = axes[r, c]
+        sub = aligned[aligned["name"].astype(str) == factor]
+        x = sub[time_key] if (time_key is not None and time_key in sub.columns) else sub.index
+        ax.plot(x, sub["ref_value"].cumsum(), label="ref", color="#1f77b4")
+        ax.plot(x, sub["user_value"].cumsum(), label="user", color="#ff7f0e", alpha=0.85)
+        ax.set_title(str(factor))
+        ax.grid(True, alpha=0.3)
+        if r == nrows - 1:
+            ax.set_xlabel(time_key or "index")
+        ax.set_ylabel("cumsum")
+
+    # Hide any unused axes
+    for j in range(n, nrows * ncols):
+        r = j // ncols
+        c = j % ncols
+        fig.delaxes(axes[r, c])
+
+    # Add a global title and legend
+    fig.suptitle(title, y=0.98)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper right")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 
 
@@ -182,6 +230,7 @@ def validate_factor(
     return_plot: bool = True,
     plot_title: Optional[str] = None,
     sort_by_time: bool = True,
+    max_plot_factors: int = 8,
 ) -> ValidationReport:
     """Validate a user-generated factor series against a reference series.
 
@@ -241,6 +290,22 @@ def validate_factor(
 
     mse, rmse, mae, corr, ic = _compute_metrics(aligned)
 
+    # Per-factor metrics (when a factor dimension is present)
+    per_factor_metrics: Dict[str, Dict[str, Optional[float]]] = {}
+    per_factor_n_obs: Dict[str, int] = {}
+    if "name" in aligned.columns:
+        for factor_name, sub in aligned.groupby("name", sort=False):
+            fmse, frmse, fmae, fcorr, fic = _compute_metrics(sub)
+            key = str(factor_name)
+            per_factor_metrics[key] = {
+                "mse": fmse,
+                "rmse": frmse,
+                "mae": fmae,
+                "corr": fcorr,
+                "ic": fic,
+            }
+            per_factor_n_obs[key] = int(len(sub))
+
     # Populate diagnostics
     diagnostics: Dict[str, Any] = {
         "user_rows": int(len(user)),
@@ -269,8 +334,14 @@ def validate_factor(
 
     figure: Optional[Figure] = None
     if return_plot:
-        title = plot_title or "Factor validation: user vs reference"
-        figure = _maybe_plot(aligned, time_key=time_key, title=title)
+        title = plot_title or "Factor validation (cumsum): user vs reference"
+        figure = _maybe_plot_cumsum(
+            aligned,
+            time_key=time_key,
+            on=on,
+            title=title,
+            max_plot_factors=max_plot_factors,
+        )
 
     return ValidationReport(
         mse=mse,
@@ -285,5 +356,7 @@ def validate_factor(
         thresholds=thresholds,
         diagnostics=diagnostics,
         figure=figure,
+        per_factor_metrics=per_factor_metrics or None,
+        per_factor_n_obs=per_factor_n_obs or None,
     )
 
