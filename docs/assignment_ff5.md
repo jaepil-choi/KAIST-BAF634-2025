@@ -17,7 +17,7 @@
 - 본 과제의 원자료는 **JKP 글로벌 팩터 데이터셋**(jkpfactors.com)에 기반합니다.
 - 데이터는 “Is There a Replication Crisis in Finance?” (Jensen, Kelly, Pedersen, Journal of Finance, 2023)을 사용합니다.
 
-## 3) 구현 요구사항 (방법론 요약)
+## 3) 구현 요구사항
 
 - **핵심 아이디어**: **Fama–French 이중 정렬(double sorting)** 방법론에 따라 **교차 정렬**을 수행하여 롱–숏 팩터 수익률을 산출합니다.
 - **특성 데이터**(예: `be_me`)는 이미 제공되어 있으므로, **올바른 정렬 절차**와 **교차 포트폴리오 구성**으로 팩터 수익률을 계산합니다.
