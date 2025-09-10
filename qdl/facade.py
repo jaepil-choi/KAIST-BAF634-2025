@@ -15,6 +15,7 @@ import pandas as pd
 
 from qdl import dataloader as _dataloader  # absolute import per project policy
 from qdl import validator as _validator    # validator API expected to be defined later
+from qdl import transformer as _transformer
 
 
 class QDL:
@@ -33,7 +34,7 @@ class QDL:
         self._loader = loader or _dataloader
         self._validator = validator or _validator
 
-    def load_factors(
+    def load_factor_dataset(
         self,
         *,
         country: Literal["usa", "kor"],
@@ -45,15 +46,15 @@ class QDL:
         strict: bool = True,
     ) -> pd.DataFrame:
         """
-        Load factor datasets (CSV) via the public API.
+        Load the raw long-form factor dataset (CSV) via the public API.
 
         Delegates to dataloader.load_factors.
 
         Notes
         -----
-        - Regardless of the requested `columns`, the composite identifier
-          ["date", "name"] is always included in the returned frame to
-          support downstream operations (e.g., pivoting or validation).
+        - Returns long-form data.
+        - Regardless of the requested `columns`, the composite identifier ["date","name"]
+          is always included to support downstream operations.
         """
         df = self._loader.load_factors(
             country=country,
@@ -77,6 +78,45 @@ class QDL:
         keys_first = [c for c in required_keys if c in df.columns]
         rest = [c for c in requested_with_required if c in df.columns and c not in required_keys]
         return df[keys_first + rest]
+
+    def load_factors(
+        self,
+        *,
+        country: Literal["usa", "kor"],
+        dataset: Literal["factor", "theme", "mkt"],
+        weighting: Literal["ew", "vw", "vw_cap"],
+        frequency: Literal["monthly"] = "monthly",
+        encoding: str = "utf-8",
+        factors: Optional[List[str]] = None,
+        strict: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Load factors and return a wide DataFrame (date index, factor names as columns).
+
+        Parameters
+        ----------
+        factors : list[str], optional
+            Subset of factor names (wide columns) to return. If provided and `strict=True`,
+            raise when any requested factor is missing. If `strict=False`, return the
+            intersection silently.
+        """
+        long_df = self.load_factor_dataset(
+            country=country,
+            dataset=dataset,
+            weighting=weighting,
+            frequency=frequency,
+            encoding=encoding,
+            columns=["date", "name", "ret"],
+            strict=True,
+        )
+        wide = _transformer.to_wide_factors(long_df)
+        if factors is None:
+            return wide
+        missing = [f for f in factors if f not in wide.columns]
+        if missing and strict:
+            raise KeyError(f"Requested factors not found: {missing}")
+        present_in_order = [f for f in factors if f in wide.columns]
+        return wide[present_in_order]
 
     def load_chars(
         self,
@@ -157,7 +197,7 @@ class QDL:
         value_col : str
             Name of the numeric value column to compare. Required (no PRD default).
         reference_load_params : dict, optional
-            Parameters forwarded to self.load_factors(**params) when reference_df is not provided.
+            Parameters forwarded to self.load_factor_dataset(**params) when reference_df is not provided.
         names : list[str], optional
             Optional list of factor names to include in the validation when
             working with long-form factors (column "name"). Both user and
@@ -174,7 +214,7 @@ class QDL:
                 raise ValueError(
                     "reference_df is None and reference_load_params not provided; cannot load reference"
                 )
-            ref = self.load_factors(**reference_load_params)
+            ref = self.load_factor_dataset(**reference_load_params)
         else:
             ref = reference_df
 

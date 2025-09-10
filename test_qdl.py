@@ -4,24 +4,29 @@ from qdl.facade import QDL
 
 
 def main() -> None:
-    # Load via core loader and manually project required columns for wide pivot
-    df = dataloader.load_factors(country="usa", dataset="mkt", weighting="vw")[
-        ["date", "name", "ret"]
-    ]
-    print(df.head(5))
-
-    wide = transformer.to_wide_factors(df)
-    print(wide.head(5))
-
-    # Alternative: load via public API and pivot to wide
     q = QDL()
-    df2 = q.load_factors(
+
+    # 1) Load long-form via facade.load_factor_dataset and pivot to wide
+    df_long = q.load_factor_dataset(
         country="usa",
         dataset="factor",
         weighting="vw",
         columns=["date", "name", "ret"],
     )
-    wide2 = transformer.to_wide_factors(df2)
+    print(df_long.head(5))
+
+    wide = transformer.to_wide_factors(df_long)
+    print(wide.head(5))
+
+    # 2) Load directly as wide via facade.load_factors (with factor selection)
+    selected_factors = ["qmj", "sale_gr1", "ivol_ff3_21d", "cash_at", "be_me"]
+    wide2 = q.load_factors(
+        country="usa",
+        dataset="factor",
+        weighting="vw",
+        factors=selected_factors,
+        strict=False,
+    )
     print(wide2.head(5))
 
     # Add clipped normal noise to create a distinct user series for demo
@@ -36,8 +41,9 @@ def main() -> None:
     ref_wide = wide2.iloc[:-6].copy()          # drop last ~6 rows from reference
 
     common_idx = user_wide.index.intersection(ref_wide.index)
-    user_aligned = user_wide.loc[common_idx, :]
-    ref_aligned = ref_wide.loc[common_idx, :]
+    common_cols = user_wide.columns.intersection(ref_wide.columns)
+    user_aligned = user_wide.loc[common_idx, common_cols]
+    ref_aligned = ref_wide.loc[common_idx, common_cols]
 
     print("\nValidation (index inner-join) period:", common_idx.min(), "to", common_idx.max())
     print("Aligned length:", len(common_idx))
@@ -47,15 +53,14 @@ def main() -> None:
     # Build long-form user/reference with differing periods and propagate the same noise to user
     user_start = common_idx.min()
     ref_end = common_idx.max()
-    user_long = df2[df2["date"] >= user_start].copy()
-    ref_long = df2[df2["date"] <= ref_end].copy()
+    user_long = df_long[df_long["date"] >= user_start].copy()
+    ref_long = df_long[df_long["date"] <= ref_end].copy()
+    # Restrict to selected factors for validation
+    user_long = user_long[user_long["name"].isin(selected_factors)]
+    ref_long = ref_long[ref_long["name"].isin(selected_factors)]
 
     # Convert wide noise to long and merge to add noise to user_long 'ret'
-    noise_df = (
-        transformer.to_wide_factors(df2)  # ensure same shape/labels as wide2
-    )
-    # Replace with the exact noise used above to ensure identical alignment
-    # Reconstruct as DataFrame with matching index/columns
+    # Reconstruct as DataFrame with matching index/columns (same noise as wide2 above)
     import pandas as pd
     noise_df = pd.DataFrame(noise, index=wide2.index, columns=wide2.columns)
     noise_long = noise_df.stack().reset_index()
