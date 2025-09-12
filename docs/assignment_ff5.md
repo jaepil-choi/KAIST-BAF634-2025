@@ -2,14 +2,7 @@
 
 ## 1) 과제 개요
 
-- **목표**: 제공된 특성(characteristics) 데이터를 사용하여 다음 7개 팩터의 월별 수익률을 복제합니다.
-  - **Size (SMB)**: Small minus Big
-  - **Value (HML)**: High minus Low (예: `be_me` 활용)
-  - **Profitability (RMW)**: Robust minus Weak
-  - **Investment (CMA)**: Conservative minus Aggressive
-  - **Market (Mkt, Rm−Rf)**: 시장수익 − 무위험수익
-  - **Momentum (MOM)**: 모멘텀
-  - **Short-Term Reversal (STR)**: 단기 반전
+- **목표**: 제공된 특성(characteristics) 데이터를 사용하여 Size, Value, Profitability, Investment, Market, Momentum, Short-Term Reversal 요인의 월별 수익률을 복제합니다.
 - **대상**: **USA**, **KOR** 두 개 국가에 대해 동일한 절차로 팩터를 구성합니다.
 
 ## 2) 데이터 출처 및 맥락
@@ -19,9 +12,24 @@
 
 ## 3) 구현 요구사항
 
-- **핵심 아이디어**: **Fama–French 이중 정렬(double sorting)** 방법론에 따라 **교차 정렬**을 수행하여 롱–숏 팩터 수익률을 산출합니다.
-- **특성 데이터**(예: `be_me`)는 이미 제공되어 있으므로, **올바른 정렬 절차**와 **교차 포트폴리오 구성**으로 팩터 수익률을 계산합니다.
-- **시장팩터(Mkt, Rm−Rf)** 는 시장수익에서 무위험수익을 차감하여 계산합니다.
+- 데이터 스펙 문서의 "2. Factor Portfolio Construction" 절을 그대로 따릅니다.
+  - 모든 팩터를 `ew`, `vw`, `vw_cap` 가중치 각각에 대해 만듭니다.
+  - 힌트:
+    - NYSE 20th percentile은 `size_grp`로 구분할 수 있습니다.
+- size (SMB, small minus big)
+  - `market_equity`
+- value (HML, high minus low)
+  - `be_me`
+- profitability (RMW, robust minus weak)
+  - `ope_be`
+- investment (CMA, conservative minus aggressive)
+  - `at_gr1`
+- market (Rm-Rf)
+  - 적절한 `[usa]_[mkt]_[monthly]_..` 를 사용합니다
+- momentum (MOM)
+  - `ret_12_1`
+- short-term reversal (STR)
+  - `ret_1_0`
 
 ## 4) 검증(Validation)과 피드백
 
