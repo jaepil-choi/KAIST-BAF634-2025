@@ -19,7 +19,15 @@ def main() -> None:
     print(wide.head(5))
 
     # 2) 퍼사드 load_factors로 바로 와이드 데이터 로드(선택한 팩터만)
-    selected_factors = ["qmj", "sale_gr1", "ivol_ff3_21d", "cash_at", "be_me"]
+    # 과제 명세의 백틱(``) 변수명을 사용 (시장 mkt 제외)
+    selected_factors = [
+        "market_equity",  # Size
+        "be_me",          # Value
+        "ope_be",         # Profitability
+        "at_gr1",         # Investment
+        "ret_12_1",       # Momentum
+        "ret_1_0",        # Short-term reversal
+    ]
     wide2 = q.load_factors(
         country="usa",
         dataset="factor",
@@ -49,47 +57,34 @@ def main() -> None:
     print("정렬된 길이:", len(common_idx))
     print("열 집합 동일 여부:", set(user_aligned.columns) == set(ref_aligned.columns))
 
-    # validator.ValidationReport 사용(명시적 조인 키). 기간을 다르게 하고 동일 잡음을 반영
-    user_start = common_idx.min()
-    ref_end = common_idx.max()
-    user_long = df_long[df_long["date"] >= user_start].copy()
-    ref_long = df_long[df_long["date"] <= ref_end].copy()
-    # 검증에 사용할 선택 팩터만 남김
-    user_long = user_long[user_long["name"].isin(selected_factors)]
-    ref_long = ref_long[ref_long["name"].isin(selected_factors)]
-
-    # 와이드 잡음을 롱 포맷으로 변환하여 user_long의 'ret'에 더함(위에서와 동일 잡음)
-    import pandas as pd
-    noise_df = pd.DataFrame(noise, index=wide2.index, columns=wide2.columns)
-    noise_long = noise_df.stack().reset_index()
-    noise_long.columns = ["date", "name", "_noise"]
-    user_long = user_long.merge(noise_long, on=["date", "name"], how="left")
-    user_long["_noise"] = user_long["_noise"].fillna(0.0)
-    user_long["ret"] = user_long["ret"] + user_long["_noise"]
-    user_long = user_long.drop(columns=["_noise"])  # clean up
-
+    # 와이드 포맷 검증 호출(인덱스/열 교집합 정렬된 DataFrame 사용)
     report = validator.validate_factor(
-        user=user_long,
-        reference=ref_long,
-        on=["date", "name"],
-        value_col="ret",
+        user=user_aligned,
+        reference=ref_aligned,
         return_plot=True,
         plot_title="Cumsum by factor: user vs reference",
         max_plot_factors=12,
     )
     print("\n검증 리포트:")
     print("관측치수:", report.n_obs, "시작일:", report.date_start, "종료일:", report.date_end)
-    print("mse:", report.mse, "rmse:", report.rmse, "mae:", report.mae, "corr:", report.corr)
+    def _fmt(x):
+        return f"{x:.3f}" if x is not None else "nan"
+    print(
+        "mse:", _fmt(report.mse),
+        "rmse:", _fmt(report.rmse),
+        "mae:", _fmt(report.mae),
+        "corr:", _fmt(report.corr),
+    )
     # Per-factor metrics
     if report.per_factor_metrics:
         print("\n팩터별 지표:")
         for factor, metrics in report.per_factor_metrics.items():
             n = (report.per_factor_n_obs or {}).get(factor)
-            mse = metrics.get("mse")
-            rmse = metrics.get("rmse")
-            mae = metrics.get("mae")
-            corr = metrics.get("corr")
-            ic = metrics.get("ic")
+            mse = _fmt(metrics.get("mse"))
+            rmse = _fmt(metrics.get("rmse"))
+            mae = _fmt(metrics.get("mae"))
+            corr = _fmt(metrics.get("corr"))
+            ic = _fmt(metrics.get("ic"))
             print(
                 f"{factor}: 관측치수={n}, mse={mse}, rmse={rmse}, mae={mae}, corr={corr}, ic={ic}"
             )

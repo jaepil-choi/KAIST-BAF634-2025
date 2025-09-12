@@ -224,106 +224,82 @@ def validate_factor(
     *,
     user: pd.DataFrame,
     reference: pd.DataFrame,
-    on: List[str],
-    value_col: str,
     thresholds: Optional[Dict[str, float]] = None,
     return_plot: bool = True,
     plot_title: Optional[str] = None,
     sort_by_time: bool = True,
     max_plot_factors: int = 8,
 ) -> ValidationReport:
-    """Validate a user-generated factor series against a reference series.
+    """Validate wide-form factor data (date index, factor names as columns)."""
+    if user.empty or reference.empty:
+        raise ValueError("user/reference must be non-empty wide DataFrames")
 
-    Parameters
-    ----------
-    user : pd.DataFrame
-        User-provided factor returns. Must include all `on` keys and `value_col`.
-    reference : pd.DataFrame
-        Reference factor returns. Must include all `on` keys and `value_col`.
-    on : list[str]
-        Explicit join keys for alignment (e.g., ["date"] or ["date","name"]).
-    value_col : str
-        Column name containing numeric values to compare.
-    thresholds : dict, optional
-        Rules like {"mse_max": 1e-6, "corr_min": 0.99}. If provided, the
-        `pass_thresholds` field will report whether all constraints are met.
-    return_plot : bool, default True
-        When True and Matplotlib is available, return a Figure overlaying
-        reference vs user and the error series.
-    plot_title : str, optional
-        Title for the plot figure. If None, a default is composed.
-    sort_by_time : bool, default True
-        If a time-like key exists among `on`, sort by it before plotting.
-    """
+    # Align by intersection of index (dates) and columns (factor names)
+    common_idx = user.index.intersection(reference.index)
+    common_cols = user.columns.intersection(reference.columns)
+    if len(common_idx) == 0 or len(common_cols) == 0:
+        raise ValueError("No overlap between user and reference on index and/or columns")
 
-    if not on:
-        raise ValueError("'on' must be a non-empty list of join key names")
-    if not isinstance(value_col, str) or not value_col:
-        raise ValueError("'value_col' must be a non-empty string")
+    user_aligned = user.loc[common_idx, common_cols]
+    ref_aligned = reference.loc[common_idx, common_cols]
 
-    _ensure_required_columns(user, on + [value_col], frame_name="user")
-    _ensure_required_columns(reference, on + [value_col], frame_name="reference")
+    # Optionally sort by time if index is datetime-like
+    if sort_by_time and pd.api.types.is_datetime64_any_dtype(user_aligned.index):
+        user_aligned = user_aligned.sort_index()
+        ref_aligned = ref_aligned.reindex(user_aligned.index)
 
-    user_work = user[on + [value_col]].copy()
-    ref_work = reference[on + [value_col]].copy()
-
-    # Coerce to numeric (report NA drops in diagnostics)
-    user_work[value_col] = _coerce_numeric(user_work[value_col], name=value_col)
-    ref_work[value_col] = _coerce_numeric(ref_work[value_col], name=value_col)
-
-    # Align on explicit keys
-    left = user_work.rename(columns={value_col: "user_value"})
-    right = ref_work.rename(columns={value_col: "ref_value"})
-    aligned = pd.merge(left, right, on=on, how="inner")
-    if aligned.empty:
-        raise ValueError("Alignment produced zero rows; check 'on' keys and overlapping periods/universe")
-
-    # Drop rows with NA in either value
+    # Build a long aligned frame for metric computation and plotting reuse
+    user_long = user_aligned.stack().rename("user_value").reset_index()
+    ref_long = ref_aligned.stack().rename("ref_value").reset_index()
+    idx_name = user_aligned.index.name or "date"
+    user_long.columns = [idx_name, "name", "user_value"]
+    ref_long.columns = [idx_name, "name", "ref_value"]
+    aligned = pd.merge(user_long, ref_long, on=[idx_name, "name"], how="inner")
     pre_drop = len(aligned)
     aligned = aligned.dropna(subset=["user_value", "ref_value"]).copy()
     if aligned.empty:
         raise ValueError("After dropping NA values, no overlapping observations remain for comparison")
 
-    time_key = _pick_time_key(on, aligned)
-    if sort_by_time and time_key is not None:
-        aligned = aligned.sort_values(by=time_key)
-
     mse, rmse, mae, corr, ic = _compute_metrics(aligned)
 
-    # Per-factor metrics (when a factor dimension is present)
+    # Per-factor metrics
     per_factor_metrics: Dict[str, Dict[str, Optional[float]]] = {}
     per_factor_n_obs: Dict[str, int] = {}
-    if "name" in aligned.columns:
-        for factor_name, sub in aligned.groupby("name", sort=False):
-            fmse, frmse, fmae, fcorr, fic = _compute_metrics(sub)
-            key = str(factor_name)
-            per_factor_metrics[key] = {
-                "mse": fmse,
-                "rmse": frmse,
-                "mae": fmae,
-                "corr": fcorr,
-                "ic": fic,
-            }
-            per_factor_n_obs[key] = int(len(sub))
+    for factor_name, sub in aligned.groupby("name", sort=False):
+        fmse, frmse, fmae, fcorr, fic = _compute_metrics(sub)
+        key = str(factor_name)
+        per_factor_metrics[key] = {
+            "mse": fmse,
+            "rmse": frmse,
+            "mae": fmae,
+            "corr": fcorr,
+            "ic": fic,
+        }
+        per_factor_n_obs[key] = int(len(sub))
 
-    # Populate diagnostics
     diagnostics: Dict[str, Any] = {
-        "user_rows": int(len(user)),
-        "reference_rows": int(len(reference)),
+        "user_rows": int(user_aligned.size),
+        "reference_rows": int(ref_aligned.size),
         "aligned_rows_before_dropna": int(pre_drop),
         "aligned_rows": int(len(aligned)),
-        "join_keys": list(on),
-        "value_col": value_col,
+        "num_factors": int(len(common_cols)),
     }
 
-    # Date range if a time key is present
-    if time_key is not None:
-        try:
-            date_start = pd.to_datetime(aligned[time_key]).min()
-            date_end = pd.to_datetime(aligned[time_key]).max()
-        except Exception:
-            date_start = None
-            date_end = None
+    figure: Optional[Figure] = None
+    if return_plot:
+        time_key = idx_name if idx_name in aligned.columns and pd.api.types.is_datetime64_any_dtype(aligned[idx_name]) else None
+        title = plot_title or "Factor validation (cumsum): user vs reference"
+        figure = _maybe_plot_cumsum(
+            aligned,
+            time_key=time_key,
+            on=[idx_name, "name"],
+            title=title,
+            max_plot_factors=max_plot_factors,
+        )
+
+    if idx_name in aligned.columns and pd.api.types.is_datetime64_any_dtype(aligned[idx_name]):
+        date_start = pd.to_datetime(aligned[idx_name]).min()
+        date_end = pd.to_datetime(aligned[idx_name]).max()
     else:
         date_start = None
         date_end = None
@@ -331,17 +307,6 @@ def validate_factor(
     pass_thresholds = _evaluate_thresholds(
         mse=mse, rmse=rmse, mae=mae, corr=corr, ic=ic, thresholds=thresholds
     )
-
-    figure: Optional[Figure] = None
-    if return_plot:
-        title = plot_title or "Factor validation (cumsum): user vs reference"
-        figure = _maybe_plot_cumsum(
-            aligned,
-            time_key=time_key,
-            on=on,
-            title=title,
-            max_plot_factors=max_plot_factors,
-        )
 
     return ValidationReport(
         mse=mse,
