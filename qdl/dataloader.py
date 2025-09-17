@@ -229,8 +229,12 @@ def load_chars(
     """
     file_path = _resolve_single_parquet(CHARS_PATH, file_name=file_name, patterns=patterns)
     df = pd.read_parquet(file_path, columns=columns, engine=engine)
-    # Ensure 'date' is datetime for downstream comparisons/joins
+    # Ensure 'date' and 'eom' are datetime for downstream comparisons/joins
+    # Parse independently when present to support either time key downstream.
     if "date" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["date"]):
         df = df.copy()
         df["date"] = pd.to_datetime(df["date"], errors="raise")
+    if "eom" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["eom"]):
+        df = df.copy()
+        df["eom"] = pd.to_datetime(df["eom"], errors="raise")
     return df

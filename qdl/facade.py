@@ -126,6 +126,8 @@ class QDL:
         columns: Optional[List[str]] = None,
         engine: str = "pyarrow",
         strict: bool = True,
+        id_col: Literal["id"] = "id",
+        date_col: Literal["eom", "date"] = "eom",
     ) -> pd.DataFrame:
         """
         Load JKP characteristics datasets (Parquet) via the public API.
@@ -135,12 +137,13 @@ class QDL:
         Notes
         -----
         - Regardless of the requested `columns`, the composite identifier
-          ["date", "id"] is always included in the returned frame to support
-          downstream operations (e.g., pivoting).
+          [date_col, id_col] is always included in the returned frame to support
+          downstream operations (e.g., pivoting). `date_col` must be one of {"eom","date"};
+          `id_col` is fixed to "id".
         """
         file_name = f"jkp_{vintage}_{country}.parquet"
         # Always include composite identifier keys for chars
-        required_keys = ["date", "id"]
+        required_keys = [date_col, id_col]
         if columns is None:
             requested_with_required = None
         else:
@@ -181,6 +184,8 @@ class QDL:
         columns: Optional[List[str]] = None,
         engine: str = "pyarrow",
         strict: bool = True,
+        id_col: Literal["id"] = "id",
+        date_col: Literal["eom", "date"] = "eom",
     ) -> pd.DataFrame:
         return self.load_char_dataset(
             country=country,
@@ -188,6 +193,8 @@ class QDL:
             columns=columns,
             engine=engine,
             strict=strict,
+            id_col=id_col,
+            date_col=date_col,
         )
 
     def load_char(
@@ -198,24 +205,28 @@ class QDL:
         char: str,
         engine: str = "pyarrow",
         strict: bool = True,
+        id_col: Literal["id"] = "id",
+        date_col: Literal["eom", "date"] = "eom",
     ) -> pd.DataFrame:
         """
-        Load a single characteristic and return a 2D wide DataFrame with `date` as index
-        and `id` as columns, values from the specified `char` column.
+        Load a single characteristic and return a 2D wide DataFrame with `date_col` as index
+        and `id_col` as columns, values from the specified `char` column.
         """
         # Ensure required columns are present (strict load to surface errors early)
         df = self.load_char_dataset(
             country=country,
             vintage=vintage,
-            columns=["date", "id", char],
+            columns=[date_col, id_col, char],
             engine=engine,
             strict=True if strict else False,
+            id_col=id_col,
+            date_col=date_col,
         )
         # Pivot to wide
         wide = _transformer.to_wide(
             df,
-            index_cols=["date"],
-            column_col="id",
+            index_cols=[date_col],
+            column_col=id_col,
             value_col=char,
             agg="first",
             sort_index=True,
