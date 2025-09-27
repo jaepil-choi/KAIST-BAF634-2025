@@ -9,7 +9,7 @@ Minimal facade exposing only load and validate_factor per PRD v0.2.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import pandas as pd
 
@@ -237,61 +237,95 @@ class QDL:
     def validate_factor(
         self,
         *,
-        user_df: pd.DataFrame,
+        user: Union[pd.Series, pd.DataFrame],
+        answer: Optional[Union[str, List[str]]] = None,
         reference_df: Optional[pd.DataFrame] = None,
-        on: Optional[List[str]] = None,
-        value_col: Optional[str] = None,
-        reference_load_params: Optional[Dict[str, Any]] = None,
-        names: Optional[List[str]] = None,
+        # Optional convenience params for auto-loading reference factors
+        country: Literal["usa", "kor"] = "usa",
+        dataset: Literal["factor", "theme", "mkt"] = "factor",
+        weighting: Literal["ew", "vw", "vw_cap"] = "ew",
+        frequency: Literal["monthly"] = "monthly",
+        encoding: str = "utf-8",
+        strict: bool = True,
         **kwargs: Any,
     ) -> Any:
-        """
-        Validate a user-generated factor series against a reference.
+        """Validate factor returns using a simple Series/DataFrame + factor-name(s) interface.
 
-        Parameters
-        ----------
-        user_df : pd.DataFrame
-            User-provided factor data.
-        reference_df : pd.DataFrame, optional
-            Reference factor data. If not provided, it will be loaded using reference_load_params.
-        on : list[str]
-            Join keys for alignment (e.g., [time, series-id]). Required (no PRD default).
-        value_col : str
-            Name of the numeric value column to compare. Required (no PRD default).
-        reference_load_params : dict, optional
-            Parameters forwarded to self.load_factor_dataset(**params) when reference_df is not provided.
-        names : list[str], optional
-            Optional list of factor names to include in the validation when
-            working with long-form factors (column "name"). Both user and
-            reference datasets will be filtered to these names when the column
-            exists.
-        kwargs : Any
-            Forwarded to the underlying validator implementation (e.g., thresholds).
-        """
-        if on is None or value_col is None:
-            raise ValueError("validate_factor requires explicit 'on' and 'value_col' arguments")
+        This convenience wrapper expects wide-form factor data (date index, factor names as columns)
+        as used by qdl.validator.validate_factor.
 
-        if reference_df is None:
-            if not reference_load_params:
-                raise ValueError(
-                    "reference_df is None and reference_load_params not provided; cannot load reference"
-                )
-            ref = self.load_factor_dataset(**reference_load_params)
+        Usage patterns
+        --------------
+        - Single factor:
+          - user: pd.Series (index=date), answer: str factor name
+          - or user: pd.DataFrame with one column; answer optionally the same name
+        - Multiple factors:
+          - user: pd.DataFrame with columns of factor names; answer: list[str] (optional). If omitted,
+            all user columns are used.
+
+        Reference data
+        --------------
+        - If reference_df is provided, it is used directly (wide form expected)
+        - Otherwise, reference factors are auto-loaded via load_factors(...) using (country, dataset,
+          weighting, frequency, encoding) and the requested factor names.
+        """
+
+        # Normalize user input to wide DataFrame and determine which factors to load
+        if isinstance(user, pd.Series):
+            # Series → single factor; infer name from 'answer' or the series name
+            if isinstance(answer, list):
+                raise ValueError("When 'user' is a Series, 'answer' must be a single factor name (str)")
+            col_name: Optional[str]
+            if isinstance(answer, str):
+                col_name = answer
+            else:
+                col_name = str(user.name) if user.name is not None else None
+            if not col_name:
+                raise ValueError("Provide 'answer' as the factor name or set Series.name to the factor name")
+            user_wide = user.to_frame(name=str(col_name))
+            factors_to_load: List[str] = [str(col_name)]
+        elif isinstance(user, pd.DataFrame):
+            user_wide = user
+            if answer is None:
+                factors_to_load = [str(c) for c in user_wide.columns]
+            elif isinstance(answer, str):
+                factors_to_load = [answer]
+                # If user has more columns than requested, project to the requested set when present
+                if answer in user_wide.columns:
+                    user_wide = user_wide[[answer]]
+                elif strict:
+                    raise KeyError(f"User DataFrame does not contain requested factor column: {answer}")
+            else:
+                # list[str]
+                factors_to_load = [str(a) for a in answer]
+                missing = [a for a in factors_to_load if a not in user_wide.columns]
+                if missing and strict:
+                    raise KeyError(f"User DataFrame missing requested factor columns: {missing}")
+                # Keep only requested columns, in provided order, when present
+                present_in_order = [a for a in factors_to_load if a in user_wide.columns]
+                if present_in_order:
+                    user_wide = user_wide[present_in_order]
         else:
-            ref = reference_df
+            raise TypeError("'user' must be a pandas Series or DataFrame in wide form (date index)")
 
-        # Optional name-level filtering (long format factors)
-        if names:
-            if "name" in user_df.columns:
-                user_df = user_df[user_df["name"].isin(names)]
-            if "name" in ref.columns:
-                ref = ref[ref["name"].isin(names)]
+        # Resolve reference
+        if reference_df is not None:
+            ref_wide = reference_df
+        else:
+            # Auto-load the reference factors via the facade
+            ref_wide = self.load_factors(
+                country=country,
+                dataset=dataset,
+                weighting=weighting,
+                frequency=frequency,
+                encoding=encoding,
+                factors=factors_to_load,
+                strict=strict,
+            )
 
-        # Delegate to validator; assumes a compatible API exists.
+        # Delegate to validator (expects wide-form)
         return self._validator.validate_factor(
-            user=user_df,
-            reference=ref,
-            on=on,
-            value_col=value_col,
+            user=user_wide,
+            reference=ref_wide,
             **kwargs,
         )

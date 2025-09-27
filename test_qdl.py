@@ -3,6 +3,73 @@ import numpy as np
 from qdl.facade import QDL
 
 
+def _assert_close(a: float, b: float, tol: float = 1e-6) -> None:
+    assert a is not None
+    assert abs(a - b) <= tol, f"Expected {b}, got {a}"
+
+
+def run_validate_factor_facade_tests() -> None:
+    q = QDL()
+
+    # 1) Single factor: Series + answer
+    ref = q.load_factors(country="usa", dataset="factor", weighting="ew", factors=["at_gr1"])  # wide
+    user_series = ref["at_gr1"].copy()
+    report = q.validate_factor(user=user_series, answer="at_gr1", return_plot=False)
+    assert report.n_obs > 0
+    _assert_close(report.mse, 0.0)
+    _assert_close(report.rmse, 0.0)
+    _assert_close(report.mae, 0.0)
+    _assert_close(report.corr, 1.0)
+    print("facade: series + answer OK")
+
+    # 2) Single factor: Series with name inference
+    user_series_named = ref["at_gr1"].copy()
+    user_series_named.name = "at_gr1"
+    report = q.validate_factor(user=user_series_named, return_plot=False)
+    assert report.n_obs > 0
+    _assert_close(report.corr, 1.0)
+    print("facade: series name inference OK")
+
+    # 3) Single factor: DataFrame projection
+    user_df = ref.copy()
+    report = q.validate_factor(user=user_df, answer="at_gr1", return_plot=False)
+    assert report.n_obs > 0
+    _assert_close(report.corr, 1.0)
+    print("facade: dataframe single-factor projection OK")
+
+    # 4) Multiple factors: DataFrame + answer list
+    long_ref = q.load_factors(country="usa", dataset="factor", weighting="ew")
+    factors = list(map(str, long_ref.columns[:3]))
+    ref_multi = long_ref[factors].copy()
+    report = q.validate_factor(user=ref_multi, answer=factors, return_plot=False)
+    assert report.n_obs > 0
+    assert report.per_factor_metrics is not None
+    assert set(report.per_factor_metrics.keys()) == set(factors)
+    for name in factors:
+        _assert_close(report.per_factor_metrics[name]["mse"], 0.0)
+        _assert_close(report.per_factor_metrics[name]["rmse"], 0.0)
+        _assert_close(report.per_factor_metrics[name]["mae"], 0.0)
+        _assert_close(report.per_factor_metrics[name]["corr"], 1.0)
+    print("facade: dataframe multi-factor OK")
+
+    # 5) Explicit reference_df
+    report = q.validate_factor(user=ref, reference_df=ref, return_plot=False)
+    assert report.n_obs > 0
+    _assert_close(report.corr, 1.0)
+    print("facade: explicit reference_df OK")
+
+    # 6) Error case: Series without name and no answer
+    s = ref["at_gr1"].copy()
+    s.name = None
+    try:
+        _ = q.validate_factor(user=s, return_plot=False)
+    except ValueError as e:
+        assert "Provide 'answer'" in str(e)
+        print("facade: error on unnamed series without answer OK")
+    else:
+        raise AssertionError("Expected ValueError for unnamed Series without answer")
+
+
 def main() -> None:
     q = QDL()
 
@@ -95,6 +162,9 @@ def main() -> None:
         except Exception:
             pass
 
+    # 3) Facade validate_factor API tests
+    run_validate_factor_facade_tests()
+
     # 특성 데이터 로드(JKP 빈티지/국가 기준)
     chars = q.load_chars(
         country="usa",
@@ -104,7 +174,7 @@ def main() -> None:
     print(chars.head(5))
 
     # 특성 데이터를 와이드로 피벗(날짜 인덱스, id 컬럼), 값은 'me'
-    wide_chars = transformer.to_wide_chars(chars, value_col="me")
+    wide_chars = transformer.to_wide_chars(chars, value_col="me", date_col="eom")
     print(wide_chars.head(5))
 
 
