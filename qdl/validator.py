@@ -79,10 +79,11 @@ def _pick_time_key(on: List[str], merged: pd.DataFrame) -> Optional[str]:
 
 
 def _compute_metrics(aligned: pd.DataFrame) -> Tuple[float, float, float, Optional[float], Optional[float]]:
-    diff = aligned["user_value"] - aligned["ref_value"]
-    mse = float(np.mean(np.square(diff)))
+    # Differences in percentage points for scale-aware error metrics
+    diff_pp = 100.0 * (aligned["user_value"] - aligned["ref_value"])  # percentage point differences
+    mse = float(np.mean(np.square(diff_pp)))
     rmse = float(np.sqrt(mse))
-    mae = float(np.mean(np.abs(diff)))
+    mae = float(np.mean(np.abs(diff_pp)))
 
     # Pearson correlation (guard against constant series)
     if aligned["user_value"].nunique(dropna=True) > 1 and aligned["ref_value"].nunique(dropna=True) > 1:
