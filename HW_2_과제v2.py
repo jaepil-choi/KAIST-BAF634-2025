@@ -7,6 +7,8 @@ from qdl.facade import QDL
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from scipy.stats import f
 
 
 
@@ -125,8 +127,24 @@ plt.ylabel('Standard Deviation')
 merged['group_mean_ret_exc'] = merged.groupby(['eom', 'sid', 'gics'])['ret_exc'].transform('mean')
 
 # %%
-x = sm.add_constant(VW_summary['Mean'])
-mod1 = sm.OLS(VW_summary["Sharpe Ratio"],x, data = VW_summary).fit()
+# Compute industry value-weighted excess returns (VW) by GICS (no-apply to avoid deprecation)
+merged_vw = merged.dropna(subset=['ret_exc', 'marcap', 'gics']).copy()
+tmp = merged_vw.copy()
+tmp['wprod'] = tmp['ret_exc'] * tmp['marcap']
+agg = tmp.groupby(['eom', 'gics'])[['wprod', 'marcap']].sum()
+ind_vw_series = agg['wprod'] / agg['marcap'].replace(0, np.nan)
+ind_vw = ind_vw_series.reset_index(name='ret_vw').pivot(index='eom', columns='gics', values='ret_vw')
+
+# Summary stats for industry VW portfolios
+ind_summary = pd.DataFrame({
+    'Mean': ind_vw.mean(),
+    'Standard Deviation': ind_vw.std(),
+})
+ind_summary['Sharpe Ratio'] = ind_summary['Mean'] / ind_summary['Standard Deviation']
+
+# %%
+x = sm.add_constant(ind_summary['Mean'])
+mod1 = sm.OLS(ind_summary["Sharpe Ratio"], x).fit()
 mod1.summary()
 
 # %% [markdown]
@@ -149,36 +167,88 @@ mod1.summary()
 # $$
 
 # %%
-y = VWreturn.subtract(rm_rf['RF'],axis=0)
-y = y[0:1069] # drop the last 4 NA rows
-x = sm.add_constant(rm_rf['RM-RF'])[0:1069]
+# Build value-weighted market excess return (single Series): vw_mkt_excess
+valid_mask = wide_ret_exc.notna() & wide_marcap.notna()
+num = (wide_ret_exc.where(valid_mask) * wide_marcap.where(valid_mask)).sum(axis=1)
+den = wide_marcap.where(valid_mask).sum(axis=1)
+vw_mkt_excess = num / den
+print("vw_mkt_excess head:\n", vw_mkt_excess.head(5))
 
-alpha = []
-beta = []
-eps = []
+# %%
+# Determine common sample and select viable industries
+common_idx = ind_vw.index.intersection(vw_mkt_excess.index)
+ind_common = ind_vw.loc[common_idx]
+mkt_common = vw_mkt_excess.loc[common_idx]
 
-for pf in VWreturn.columns:
-    y_in = y[pf]
-    mod = sm.OLS(y_in,x,missing = 'drop').fit()
-    alpha.append(mod.params[0])
-    beta.append(mod.params[1])
-    eps.append(mod.resid)
+coverage = ind_common.notna().sum()
+print("industry coverage (non-null counts) sample:\n", coverage.sort_values(ascending=False).head(10))
 
-T = VWreturn.shape[0]
-N = VWreturn.shape[1]
+min_obs = 24
+selected_assets = coverage[coverage >= min_obs].index.tolist()
+ind_sel = ind_common[selected_assets]
 
-eps_df = pd.DataFrame(eps).T
-var_cov = eps_df.cov() # (30,30)
+# Ensure rows are fully observed across selected assets and market
+row_mask = ind_sel.notna().all(axis=1) & mkt_common.notna()
+ind_sel = ind_sel.loc[row_mask]
+mkt_sel = mkt_common.loc[row_mask]
 
-# create Rm column in rm_rf
-rm_rf['RM'] = rm_rf['RM-RF'] + rm_rf['RF']
+# If T <= N+1, reduce asset set by highest coverage to satisfy GRS requirements
+if ind_sel.shape[0] <= ind_sel.shape[1] + 1 and len(selected_assets) > 1:
+    counts_sorted = coverage.loc[selected_assets].sort_values(ascending=False)
+    max_k = max(1, ind_sel.shape[0] - 2)
+    keep = counts_sorted.index[:max_k].tolist()
+    ind_sel = ind_common[keep]
+    row_mask = ind_sel.notna().all(axis=1) & mkt_common.notna()
+    ind_sel = ind_sel.loc[row_mask]
+    mkt_sel = mkt_common.loc[row_mask]
 
-F = ((T-N-1)/N)* ((alpha @ np.linalg.inv(var_cov) @ np.transpose(alpha)) / (1+(rm_rf['RM'][0:1069].mean()/rm_rf['RM'][0:1069].std())**2))
-p_value = f.sf(F, N, T-N-1)
-print("F statistic: ", F, "p value: ", p_value)
+print("Common sample dimensions → T:", ind_sel.shape[0], "N:", ind_sel.shape[1])
 
-coeff_summary = pd.DataFrame({'industry':VWreturn.columns, 'alpha': alpha, 'beta': beta})
-coeff_summary
+# %%
+# OLS per industry on common sample
+X = sm.add_constant(mkt_sel)
+alphas = []
+betas = []
+residuals = []
+for col in ind_sel.columns:
+    y = ind_sel[col]
+    model = sm.OLS(y, X).fit()
+    alphas.append(model.params['const'])
+    betas.append(model.params[mkt_sel.name] if mkt_sel.name is not None else model.params.iloc[1])
+    residuals.append(model.resid)
+
+residuals_df = pd.concat(residuals, axis=1)
+residuals_df.columns = ind_sel.columns
+print("Residuals shape:", residuals_df.shape)
+
+# %%
+# Compute Σ, market Sharpe, then GRS F and p
+Sigma = residuals_df.cov().to_numpy()
+alpha_vec = np.array(alphas)
+N = len(alphas)
+T = len(mkt_sel)
+
+market_mu = mkt_sel.mean()
+market_sd = mkt_sel.std()
+
+if market_sd == 0 or N == 0 or T <= N + 1:
+    F = np.nan
+    p_value = np.nan
+else:
+    try:
+        inv_Sigma = np.linalg.inv(Sigma)
+    except np.linalg.LinAlgError:
+        print('pseudo inverse fallback used')
+        inv_Sigma = np.linalg.pinv(Sigma)
+    F = ((T - N - 1) / N) * ((alpha_vec @ inv_Sigma @ alpha_vec.T) / (1 + (market_mu / market_sd) ** 2))
+    p_value = f.sf(F, N, T - N - 1)
+
+print("T:", T, "N:", N, "market_mu:", market_mu, "market_sd:", market_sd)
+print("F statistic:", F, "p value:", p_value)
+
+# %%
+coeff_summary = pd.DataFrame({'industry': ind_sel.columns, 'alpha': alphas, 'beta': betas})
+coeff_summary.head(10)
 
 # %% [markdown]
 # $p = 0.028 < 0.05$이므로 $\alpha$ 값이 0이라는 귀무가설을 거부하며, 이는 시장 포트폴리오 프록시로 수익률을 완전히 설명할 수 없다는 것을 의미합니다(이 경우 초과 시장 수익률 (Rm - Rf)). 즉, 테스트에 사용된 시장 포트폴리오 프록시는 평균 분산에 효율적이지 않다는 뜻입니다.
@@ -234,27 +304,24 @@ plt.ylim(-0.5, 0.6)
 # ## e) 과거 수익률 포트폴리오 10개에 대해 a), b), d) 부분을 반복하세요.
 # 
 
-# %%
-# Repeat a) for 10 past return portfolios
-past_mean = pastreturn.mean()
-past_sd = pastreturn.std()
-past_sharpe = past_mean/past_sd
-past_summary = pd.DataFrame({'Mean': past_mean, 'Standard Deviation': past_sd, 'Sharpe Ratio': past_sharpe})
-past_summary
-
-# %%
-fig=plt.figure(figsize=(12,6))
-plt.plot(past_mean, past_sharpe, '.', markersize=10)
-plt.xlabel('Average Return')
-plt.ylabel('Sharpe Ratio');
-plt.title('Part II a): Sharpe Ratio vs Average Return for Past Portfolios', fontsize=16)
-plt.xlim(0, 1.5)
-plt.ylim(0, 0.25)
-
-# %%
-x = sm.add_constant(past_summary['Mean'])
-mod2 = sm.OLS(past_summary["Sharpe Ratio"], x, data = past_summary).fit()
-mod2.summary()
+## %%
+## Part II (Momentum deciles) – to be re-implemented with qdl characteristics
+## The legacy references (pastreturn, rm_rf) are commented out to avoid errors.
+##
+## Steps to implement next:
+## 1) Build deciles using q.load_char(..., char='ret_12_1') per month with lagged membership.
+## 2) Compute ew/vw decile returns using ret_exc and market_equity.
+## 3) Repeat summary stats, CAPM, and GRS using the same market series above.
+##
+## Example placeholders (commented):
+## past_mean = pastreturn.mean()
+## past_sd = pastreturn.std()
+## past_sharpe = past_mean/past_sd
+## past_summary = pd.DataFrame({'Mean': past_mean, 'Standard Deviation': past_sd, 'Sharpe Ratio': past_sharpe})
+## fig=plt.figure(figsize=(12,6))
+## plt.plot(past_mean, past_sharpe, '.', markersize=10)
+## x = sm.add_constant(past_summary['Mean'])
+## mod2 = sm.OLS(past_summary["Sharpe Ratio"], x, data = past_summary).fit()
 
 # %% [markdown]
 # 조사 결과, 과거 10개 수익률 포트폴리오의 평균 수익률과 샤프 비율 사이에는 분명한 양의 관계가 있습니다.
@@ -263,35 +330,9 @@ mod2.summary()
 # 
 # 이는 샤프비율과 수익률 간의 회귀분석을 통해 확인할 수 있으며, 그 결과 평균 수익률이 0.936의 높은 R-제곱으로 샤프비율의 많은 부분을 통계적으로 설명하는 매우 강력한 양의 관계(평균 계수 0.1883)를 보여줍니다.
 
-# %%
-# Repeat b) for 10 past return portfolios
-new_rm_rf = rm_rf.iloc[6:1069]
-y = pastreturn.subtract(new_rm_rf['RF'], axis=0)
-x = sm.add_constant(rm_rf['RM-RF'])[6:1069]
-
-alpha_1 = []
-beta_1 = []
-eps_1 = []
-
-for pf in pastreturn.columns:
-    y_in = y[pf]
-    mod = sm.OLS(y_in, x, missing = 'drop').fit()
-    alpha_1.append(mod.params[0])
-    beta_1.append(mod.params[1])
-    eps_1.append(mod.resid)
-
-T = pastreturn.shape[0]
-N = pastreturn.shape[1]
-
-eps_df = pd.DataFrame(eps_1).T
-var_cov = eps_df.cov() # (10,10)
-
-F = ((T-N-1)/N)* ((alpha_1 @ np.linalg.inv(var_cov) @ np.transpose(alpha_1)) / (1+(new_rm_rf['RM'].mean()/new_rm_rf['RM'].std())**2))
-p_value = f.sf(F, N, T-N-1)
-print("F statistic: ", F, "p value: ", p_value)
-
-coeff_summary_1 = pd.DataFrame({'industry':pastreturn.columns, 'alpha': alpha_1, 'beta': beta_1})
-coeff_summary_1
+## %%
+## Repeat b) for deciles – will reuse market series alignment as above
+## Placeholder commented to avoid undefined names until implementation.
 
 # %% [markdown]
 # $p$ ~ 0 < 0.05이므로 $\alpha$ 값이 0이라는 귀무가설을 거부하며, 이는 시장 포트폴리오 프록시로 수익률을 완전히 설명할 수 없다는 것을 의미합니다(이 경우 초과 시장 수익률(Rm - Rf)). 즉, 테스트의 시장 포트폴리오 프록시가 평균 분산 효율적이지 않다는 결론을 1부보다 더 강력하게 내릴 수 있습니다.
@@ -299,13 +340,14 @@ coeff_summary_1
 # 이러한 과거 포트폴리오의 구성에는 포트폴리오 매니저의 기술(skill)이 포함될 수 있으므로 평균 분산 효율에 더 가까운 포트폴리오를 나타내야 하며, 이는 당연한 결과입니다.
 
 # %%
-fig=plt.figure(figsize=(12,6))
-plt.plot(coeff_summary_1['beta'], coeff_summary_1['alpha'], '.', markersize=10)
-plt.xlabel('Beta')
-plt.ylabel('Alpha');
-plt.title('Part II d): Alpha vs Beta for Past Portfolios', fontsize=16)
-plt.xlim(0.9, 1.6)
-plt.ylim(-1.1, 0.7)
+# Placeholder for Part II d) plot (commented until deciles are implemented)
+# fig=plt.figure(figsize=(12,6))
+# plt.plot(coeff_summary_1['beta'], coeff_summary_1['alpha'], '.', markersize=10)
+# plt.xlabel('Beta')
+# plt.ylabel('Alpha');
+# plt.title('Part II d): Alpha vs Beta for Past Portfolios', fontsize=16)
+# plt.xlim(0.9, 1.6)
+# plt.ylim(-1.1, 0.7)
 
 # %% [markdown]
 # 위의 알파 대 베타 그래프에서 볼 수 있듯이 절편/$\alpha$의 부호와 크기는 -1.0에서 0.6까지 다양하며, 10개 포트폴리오 중 6개가 음의 $\alpha$ 값을 갖는 것을 알 수 있습니다. 절편값의 부호는 대부분 패자의 경우 음수이고 승자의 경우 양수입니다.
